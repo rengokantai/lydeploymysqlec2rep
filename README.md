@@ -157,3 +157,207 @@ create database ke;  //should also see in slave server
 ```
 #####Backing Up The Database Servers
 ######Overview Of Different Backup Methods
+schedule backup on non peek hours, backup on slave lock the table before backup, unlock after backup
+###### Mysqldump to S3
+install pip for centos. in backup server
+```
+sudo yum-config-manager --add-repo http://dl.fedoraproject.org/pub/epel/7/x86_64/  (apple repo)
+sudo yum repolist
+cd /etc/yum.repos.d
+vim dl.fedo...
+```
+edit
+```
+gpgcheck=0
+```
+then
+```
+sudo yum install -y python-pip
+sudo pip install awscli
+```
+copy ip addr of backup server, then add a security rule to dbmaster, MYSQL->source=backup ip,then insall mariasb client
+```
+sudo yum install mariadb
+```
+in masterdb, create a user for backup
+```
+sudo mysql
+create user 'backup'@'%' identified by 'pass';
+grant select,lock tables, show view,event,trigger,reload,super on *.* to 'backup'@'%';
+```
+then, on backup server, we connect to masterdb
+```
+mysql -u backup -h dbmaster.lymaria.internal -p
+exit;
+```
+then try dumping
+```
+mysqldump -h  dbmaster.lymaria.internal -ubackup -ppass --all-databases >backup.sql
+```
+create a sync script
+```
+sudo mysqldump -h  dbmaster.lymaria.internal -ubackup -ppass --all-databases >backup.sql
+sudo aws s3 sync ~ s3://lymariaback
+```
+
+lock before dump. Use slave server!
+```
+sudo mysqldump -h  dbslave.lymaria.internal -ubackup -ppass --lock-tables --all-databases >backup.sql
+```
+######Creating The EBS Snapshots
+backupserver:
+```
+sudo yum install -y jq
+```
+create a backup script
+```
+vim snapshot
+```
+
+original snap script from nugget
+```
+#! /bin/bash
+ACTION=$1
+AGE=$2
+
+if [ -z $ACTION ];
+Running transaction test
+then
+        echo "Usage $1: define action backup or delete"
+        exit 1
+fi
+
+if [ "$ACTION" = "delete" ] && [ -z $AGE ];
+then
+        echo "enter the age of backup to delete"
+        exit 1
+fi
+                     {
+function backup_ebs(){
+        for volume in $(sudo aws ec2 describe-volumes | sudo jq .Volumes[].Volum
+eId | sed 's/\"//g')
+        do
+                echo Creating snapshot for $volume $(sudo aws ec2 create-snapsho
+t --volume-id $volume --description "backscript")
+}       done
+}
+function delete_snapshots(){
+        for snapshot in $(sudo aws ec2 describe-snapshots --filters Name=descrip
+tion,Values=backscript |jq .Snapshots[].SnapshotId|sed 's/\"//g')
+        do
+                SNAPSHOTDATE=$(sudo aws ec2 describe-snapshots --filters Name=sn
+apshot-id,Values=$snapshot | jq .Snapshots[].StartTime |cut -d T -f1 |sed 's/\"/
+/g')
+                STARTDATE=$(date +%s)
+                ENDDATE=$(date -d $SNAPSHOTDATE +%s)
+                INTERVAL=$[ (STARTDATE - ENDDATE) / (60*60*24) ]
+                if (( $INTERVAL >= $AGE ));
+                then
+                        sudo aws ec2 delete-snapshot --snapshot-id $snapshot
+                fi
+        done
+}
+
+case $ACTION in
+        "backup")
+                backup_ebs
+        ;;
+        "delete")
+                delete_snapshots
+        ;;
+esac
+```
+select slavedb, assign a tag, key=slave, value is empty.check
+```
+sudo aws ec2 describe-instances --filters "Name=tag-key ,Values=slave"
+sudo aws ec2 describe-instances --filters "Name=tag-key ,Values=slave" |jq .Reservations[].Instances[].InstanceId | sed 's/\"//g'
+```
+create a backup script in backup server
+```
+#! /bin/bash
+coproc mysql {
+sudo mysql -hdbslave.lymaria.internal -ubackup -ppass
+}
+
+echo 'flush tables with read lock;' >&"${mysql[1]}"
+echo 'set global read_only = ON;' >&"${mysql[1]}"
+ssh -i mykey.pem centos@dbslave.lymaria.internal xfs_freeze -f /
+./snapshot backup
+ssh -i mykey.pem centos@dbslave.lymaria.internal xfs_freeze -u /
+echo 'set global read_only = OFF;' >&"${mysql[1]}"
+echo 'unlock tables;' >&"${mysql[1]}"
+```
+create .my.cnf in backup server (current dict)
+```
+[client]
+password="pass"
+```
+generate key on backupserver
+```
+ssh-keygen
+```
+then
+```
+cd .ssh
+cat id_rsa.pub (copy this result to slave server's authorized_keys)
+```
+script snapshot:
+```
+#! /bin/bash
+ACTION=$1
+AGE=$2
+
+if [ -z $ACTION ];
+then
+        echo "Usage $1: define action backup or delete"
+        exit 1
+fi
+
+if [ "$ACTION" = "delete" ] && [ -z $AGE ];
+then
+        echo "enter the age of backup to delete"
+        exit 1
+fi
+
+function backup_ebs(){
+        for instance in $(sudo aws ec2 describe-instances --filters "Name=tag-ke
+y ,Values=slave" |jq .Reservations[].Instances[].InstanceId | sed 's/\"//g')
+        do
+
+
+        for volume in $(sudo aws ec2 describe-volumes --filters "Name=attachment
+.instance-id,Values=$instance"| jq .Volumes[].VolumeId | sed 's/\"//g')
+        do
+                echo Creating snapshot for $volume $(sudo aws ec2 create-snapsho
+t --volume-id $volume --description "backscript")
+        done
+done
+}
+
+function delete_snapshots(){
+        for snapshot in $(sudo aws ec2 describe-snapshots --filters Name=descrip
+tion,Values=backscript |jq .Snapshots[].SnapshotId|sed 's/\"//g')
+        do
+                SNAPSHOTDATE=$(sudo aws ec2 describe-snapshots --filters Name=sn
+apshot-id,Values=$snapshot | jq .Snapshots[].StartTime |cut -d T -f1 |sed 's/\"/
+/g')
+                STARTDATE=$(date +%s)
+                ENDDATE=$(date -d $SNAPSHOTDATE +%s)
+                INTERVAL=$[ (STARTDATE - ENDDATE) / (60*60*24) ]
+                if (( $INTERVAL >= $AGE ));
+                then
+                        sudo aws ec2 delete-snapshot --snapshot-id $snapshot
+                fi
+        done
+}
+
+
+case $ACTION in
+        "backup")
+                backup_ebs
+        ;;
+        "delete")
+                delete_snapshots
+        ;;
+esac
+```
