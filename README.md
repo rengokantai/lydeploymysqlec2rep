@@ -92,3 +92,68 @@ sudo hostnamectl set-hostname backup.lymaria.internal
 sudo hostnamectl set-hostname dbmaster.lymaria.internal
 sudo hostnamectl set-hostname dbslave.lymaria.internal
 ```
+#####Configuring MariaDB/MySQL
+######Configuring The Master Server For Replication
+in master db server
+```
+sudo yum install -y mariadb-server
+sudo systemctl start mariadb
+vim /etc/my.cnf
+```
+config
+```
+# instructions in http://fedoraproject.org/wiki/Systemd
+log-basename=master
+log-bin
+binlog-format=row
+server_id=1
+
+[mysqld_safe]
+log-error=/var/log/mariadb/mariadb.log
+pid-file=/var/run/mariadb/mariadb.pid
+```
+then
+```
+sudo systemctl restart mariadb
+```
+then
+```
+sudo mysql
+create user 'test'@'%' identified by 'pass';
+grant REPLICATION SLAVE ON *.* TO test;
+```
+######Configuring The Slave Server For Replication
+```
+vim /etc/my.cnf
+```
+only change one line
+```
+server_id=2
+
+[mysqld_safe]
+log-error=/var/log/mariadb/mariadb.log
+pid-file=/var/run/mariadb/mariadb.pid
+```
+from slave, connect to master
+```
+mysql -h dbmaster.lymaria.internal -u test -p
+exit;
+```
+then local connection
+```
+sudo mysql
+change master to MASTER_HOST='dbmaster.lymaria.internal',MASTER_USER='test',MASTER_PASSWORD='pass',MASTER_PORT=3306,MASTER_CONNECT_RETRY=10;
+```
+then
+```
+start slave;
+show slave status;
+```
+in master server:
+```
+sudo mysql
+select user from mysql.user;
+create database ke;  //should also see in slave server
+```
+#####Backing Up The Database Servers
+######Overview Of Different Backup Methods
